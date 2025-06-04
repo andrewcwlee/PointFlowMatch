@@ -42,8 +42,8 @@ def main(cfg: OmegaConf):
     if cfg.env_runner.env_config.vis:
         RV("pfp_evaluate")
     wandb.init(
-        project="pfp-eval-rebuttal",
-        entity="rl-lab-chisari",
+        project="PointFlowMatch",
+        entity="itisandrewlee",
         config=OmegaConf.to_container(cfg),
         mode="online" if cfg.log_wandb else "disabled",
     )
