@@ -243,15 +243,23 @@ class RobotDatasetPcdAttention(torch.utils.data.Dataset):
         # Check if bounding box data exists in the replay buffer
         self.has_bbox_data = False
         self.has_segmentation_data = False
+        self.has_precomputed_masks = False
         
         if use_bounding_box:
-            if bbox_mode == "segmentation":
+            # First check if we have pre-computed attention masks
+            if "attention_masks" in replay_buffer.keys():
+                print(f"Found pre-computed attention masks in {data_path}")
+                data_keys.append("attention_masks")
+                data_key_first_k["attention_masks"] = n_obs_steps * subs_factor
+                self.has_precomputed_masks = True
+            elif bbox_mode == "segmentation":
                 # Check for segmentation data
                 if "segmentation_masks" in replay_buffer.keys() and "camera_point_clouds" in replay_buffer.keys():
                     data_keys.extend(["segmentation_masks", "camera_point_clouds"])
                     data_key_first_k["segmentation_masks"] = n_obs_steps * subs_factor
                     data_key_first_k["camera_point_clouds"] = n_obs_steps * subs_factor
                     self.has_segmentation_data = True
+                    print(f"Warning: No pre-computed masks found. Will generate on-the-fly (slower).")
                 else:
                     print(f"Warning: Segmentation mode requested but no segmentation data found in {data_path}")
                     print("Falling back to gripper mode")
@@ -382,8 +390,13 @@ class RobotDatasetPcdAttention(torch.utils.data.Dataset):
         
         # Generate or load attention mask
         if self.use_bounding_box:
-            if self.bbox_mode == "segmentation" and self.has_segmentation_data:
-                # Use exact segmentation masks
+            if self.has_precomputed_masks:
+                # Load pre-computed attention masks
+                attention_mask = sample["attention_masks"][: cur_step_i : self.subs_factor]
+                # Pre-computed masks are already sampled to n_points, so just extract the obs steps
+                attention_mask = attention_mask.astype(np.float32)
+            elif self.bbox_mode == "segmentation" and self.has_segmentation_data:
+                # Use exact segmentation masks (on-the-fly generation)
                 segmentation_masks = sample["segmentation_masks"][: cur_step_i : self.subs_factor]
                 camera_point_clouds = sample["camera_point_clouds"][: cur_step_i : self.subs_factor]
                 attention_mask = self.generate_attention_mask_from_segmentation(
@@ -421,8 +434,19 @@ class RobotDatasetPcdAttention(torch.utils.data.Dataset):
         if pcd.shape[1] > self.n_points:
             random_indices = np.random.choice(pcd.shape[1], self.n_points, replace=False)
             pcd = pcd[:, random_indices]
+            
+            # Also sample attention mask if it exists
             if attention_mask is not None:
-                attention_mask = attention_mask[:, random_indices]
+                # Check if mask needs sampling (full-size masks from preprocessing)
+                if attention_mask.shape[-1] > self.n_points:
+                    # Sample the same indices from the attention mask
+                    attention_mask = attention_mask[:, random_indices]
+                elif attention_mask.shape[-1] < self.n_points:
+                    # This shouldn't happen
+                    print(f"Warning: Attention mask has {attention_mask.shape[-1]} points but expected {self.n_points}")
+        elif pcd.shape[1] < self.n_points:
+            # Pad if needed (rare case)
+            print(f"Warning: PCD has only {pcd.shape[1]} points, expected {self.n_points}")
                 
         if attention_mask is not None:
             return pcd, robot_state_obs, robot_state_pred, attention_mask
