@@ -1,7 +1,27 @@
-from diffusers.optimization import (
-    Union, SchedulerType, Optional,
-    Optimizer, TYPE_TO_SCHEDULER_FUNCTION
-)
+from typing import Union, Optional
+import torch
+from torch.optim import Optimizer
+
+try:
+    from diffusers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
+except ImportError:
+    # Fallback for incompatible versions
+    from enum import Enum
+    
+    class SchedulerType(Enum):
+        CONSTANT = "constant"
+        CONSTANT_WITH_WARMUP = "constant_with_warmup"
+        COSINE = "cosine"
+        COSINE_WITH_RESTARTS = "cosine_with_restarts"
+        LINEAR = "linear"
+        POLYNOMIAL = "polynomial"
+    
+    # Simplified scheduler mapping
+    TYPE_TO_SCHEDULER_FUNCTION = {
+        SchedulerType.CONSTANT: torch.optim.lr_scheduler.ConstantLR,
+        SchedulerType.LINEAR: torch.optim.lr_scheduler.LinearLR,
+        SchedulerType.COSINE: torch.optim.lr_scheduler.CosineAnnealingLR,
+    }
 
 def get_scheduler(
     name: Union[str, SchedulerType],

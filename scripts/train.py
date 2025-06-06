@@ -13,6 +13,7 @@ from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from pfp import DEVICE, DATA_DIRS, set_seeds
 from pfp.data.dataset_pcd import RobotDatasetPcd
 from pfp.data.dataset_images import RobotDatasetImages
+from pfp.data.dataset_pcd_attention import RobotDatasetPcdAttention
 
 
 @hydra.main(version_base=None, config_path="../conf", config_name="train")
@@ -23,16 +24,34 @@ def main(cfg: OmegaConf):
     print(OmegaConf.to_yaml(cfg))
     set_seeds(cfg.seed)
 
-    data_path_train = DATA_DIRS.PFP / cfg.task_name / "train"
-    data_path_valid = DATA_DIRS.PFP / cfg.task_name / "valid"
-    if cfg.obs_mode == "pcd":
-        dataset_train = RobotDatasetPcd(data_path_train, **cfg.dataset)
-        dataset_valid = RobotDatasetPcd(data_path_valid, **cfg.dataset)
-    elif cfg.obs_mode == "rgb":
-        dataset_train = RobotDatasetImages(data_path_train, **cfg.dataset)
-        dataset_valid = RobotDatasetImages(data_path_valid, **cfg.dataset)
+    # Check if we should use attention dataset
+    if hasattr(cfg, 'dataset') and hasattr(cfg.dataset, '_target_') and 'attention' in cfg.dataset._target_:
+        # Use the attention dataset with segmented data
+        data_path_train = DATA_DIRS.PFP / cfg.task_name / "train_segmented"
+        data_path_valid = DATA_DIRS.PFP / cfg.task_name / "valid_segmented"
+        print(f"Using attention dataset with segmented data")
+        print(f"Train path: {data_path_train}")
+        print(f"Valid path: {data_path_valid}")
+        
+        # Remove _target_ from config before passing to constructor
+        dataset_cfg = OmegaConf.to_container(cfg.dataset, resolve=True)
+        dataset_cfg.pop('_target_', None)
+        
+        dataset_train = RobotDatasetPcdAttention(str(data_path_train), **dataset_cfg)
+        dataset_valid = RobotDatasetPcdAttention(str(data_path_valid), **dataset_cfg)
     else:
-        raise ValueError(f"Unknown observation mode: {cfg.obs_mode}")
+        # Use regular datasets
+        data_path_train = DATA_DIRS.PFP / cfg.task_name / "train"
+        data_path_valid = DATA_DIRS.PFP / cfg.task_name / "valid"
+        
+        if cfg.obs_mode == "pcd":
+            dataset_train = RobotDatasetPcd(data_path_train, **cfg.dataset)
+            dataset_valid = RobotDatasetPcd(data_path_valid, **cfg.dataset)
+        elif cfg.obs_mode == "rgb":
+            dataset_train = RobotDatasetImages(data_path_train, **cfg.dataset)
+            dataset_valid = RobotDatasetImages(data_path_valid, **cfg.dataset)
+        else:
+            raise ValueError(f"Unknown observation mode: {cfg.obs_mode}")
     dataloader_train = DataLoader(
         dataset_train,
         shuffle=True,
@@ -59,7 +78,7 @@ def main(cfg: OmegaConf):
 
     wandb_logger = WandBLogger(
         project="pfp-train-fixed",
-        entity="rl-lab-chisari",
+        entity="itisandrewlee",
         init_kwargs={
             "config": OmegaConf.to_container(cfg),
             "mode": "online" if cfg.log_wandb else "disabled",

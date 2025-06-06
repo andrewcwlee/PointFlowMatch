@@ -118,12 +118,12 @@ class PointNetfeatAttention(nn.Module):
             self.fstn = STNkd(k=64)
         
         # Attention module - applied after conv2 (128 channels)
+        # Note: No sigmoid here, will be applied in BCEWithLogitsLoss
         self.attention_head = nn.Sequential(
             nn.Conv1d(128, attention_hidden_dim, 1),
             nn.BatchNorm1d(attention_hidden_dim),
             nn.ReLU(),
-            nn.Conv1d(attention_hidden_dim, 1, 1),
-            nn.Sigmoid()
+            nn.Conv1d(attention_hidden_dim, 1, 1)
         )
 
     def forward(self, x):
@@ -151,9 +151,9 @@ class PointNetfeatAttention(nn.Module):
 
         x = F.relu(self.bn2(self.conv2(x)))
         
-        # Generate attention weights after conv2 (128 channels)
-        attention_scores = self.attention_head(x)  # [B, 1, NumPoints]
-        attention_weights = attention_scores  # Already sigmoid output
+        # Generate attention logits after conv2 (128 channels)
+        attention_logits = self.attention_head(x)  # [B, 1, NumPoints]
+        attention_weights = torch.sigmoid(attention_logits)  # Apply sigmoid for feature modulation
         
         # Modulate features with attention (f'_i = α_i * f_i)
         x = x * attention_weights  # Broadcasting: [B, 128, NumPoints] * [B, 1, NumPoints]
@@ -162,8 +162,8 @@ class PointNetfeatAttention(nn.Module):
         x = torch.max(x, 2, keepdim=True)[0]
         x = x.view(-1, 1024)
         
-        # Return both features and attention map
-        return x, attention_weights.squeeze(1)  # attention_weights: [B, NumPoints]
+        # Return both features and attention logits (not sigmoid)
+        return x, attention_logits.squeeze(1)  # attention_logits: [B, NumPoints]
 
 
 class PointNetAttentionBackbone(nn.Module):
@@ -226,8 +226,8 @@ class PointNetAttentionBackbone(nn.Module):
         # Reshape back to the batch dimension. Now the features of each time step are concatenated
         nx = nx.reshape(B, -1)
         
-        # Reshape attention weights back to batch dimension
-        # attention_weights shape: [B*T, NumPoints]
-        attention_weights = attention_weights.reshape(B, -1)  # [B, T*NumPoints]
+        # Reshape attention logits back to batch dimension
+        # attention_weights shape: [B*T, NumPoints] 
+        attention_logits = attention_weights.reshape(B, -1)  # [B, T*NumPoints]
         
-        return nx, attention_weights
+        return nx, attention_logits

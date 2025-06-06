@@ -16,7 +16,7 @@ dataset:
 
 # Override data path to use segmented data
 # Note: This assumes data was collected with scripts/collect_demos_with_segmentation.py
-data_path: ${oc.env:DATA_DIRS_PFP}/${env_config.task_name}/${mode}_segmented
+# We'll override this in train.yaml default_data_path
 
 # Optionally override attention-specific parameters
 model:

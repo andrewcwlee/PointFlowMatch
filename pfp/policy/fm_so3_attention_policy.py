@@ -58,8 +58,8 @@ class FMSO3AttentionPolicy(ComposerModel, BasePolicy):
         else:
             raise NotImplementedError
         
-        # BCE loss for attention supervision
-        self.attention_loss_fn = nn.BCELoss()
+        # BCE loss for attention supervision - with logits for autocast safety
+        self.attention_loss_fn = nn.BCEWithLogitsLoss()
         return
 
     def set_num_k_infer(self, num_k_infer: int):
@@ -300,8 +300,9 @@ class FMSO3AttentionPolicy(ComposerModel, BasePolicy):
             
             # Calculate IoU metric for attention
             with torch.no_grad():
-                # Threshold predictions at 0.5
-                pred_binary = (predicted_attention_map > 0.5).float()
+                # Convert logits to probabilities and threshold at 0.5
+                pred_probs = torch.sigmoid(predicted_attention_map)
+                pred_binary = (pred_probs > 0.5).float()
                 gt_binary = attention_mask_flat
                 
                 # Calculate intersection and union
