@@ -24,12 +24,6 @@ def identify_charger_and_gripper(masks, task_name="unplug_charger"):
             unique_ids = unique_ids[unique_ids > 0]  # Remove background
             all_object_ids.update(unique_ids)
     
-    # For unplug_charger task, we need to identify:
-    # 1. Charger - usually a single object at medium height
-    # 2. Gripper - multiple IDs for gripper fingers, usually highest objects
-    
-    # Since we can't automatically identify them perfectly, we'll save all masks
-    # and provide a separate analysis script to identify them
     
     print(f"Found {len(all_object_ids)} unique objects")
     print(f"Object IDs: {sorted(list(all_object_ids))}")

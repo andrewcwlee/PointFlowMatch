@@ -20,9 +20,11 @@ def merge_pcds(
     n_points: int,
     pcds: list[o3d.geometry.PointCloud],
     ws_aabb: o3d.geometry.AxisAlignedBoundingBox,
+    crop_workspace: bool = True,  # New parameter to control cropping
 ) -> o3d.geometry.PointCloud:
     merged_pcd = functools.reduce(lambda a, b: a + b, pcds, o3d.geometry.PointCloud())
-    merged_pcd = merged_pcd.crop(ws_aabb)
+    if crop_workspace:
+        merged_pcd = merged_pcd.crop(ws_aabb)
     downsampled_pcd = merged_pcd.voxel_down_sample(voxel_size=voxel_size)
     if len(downsampled_pcd.points) > n_points:
         ratio = n_points / len(downsampled_pcd.points)

@@ -1,0 +1,18 @@
+# @package _global_
+defaults:
+  - collect_demos_train
+
+# Override environment config to disable workspace cropping
+env_config:
+  task_name: unplug_charger
+  voxel_size: 0.01
+  n_points: 8192  # Increase points since we're not cropping
+  use_pc_color: True
+  headless: True
+  vis: False
+  crop_workspace: False  # Disable workspace cropping
+
+# You might want more episodes since uncropped data will be larger
+num_episodes: 10
+
+mode: train

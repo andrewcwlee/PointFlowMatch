@@ -1,0 +1,21 @@
+# @package _global_
+# Configuration for unplug_charger task with segmentation-based attention
+defaults:
+  - pointflowmatch_so3_attention
+
+# Task-specific configuration
+env_config:
+  task_name: unplug_charger
+
+# Dataset configuration with task-specific object IDs
+dataset:
+  object_ids: [31, 34, 35, 92]  # Specific to unplug_charger task
+  # You may need to update these IDs based on analyze_collected_masks.py output
+  
+# Training hyperparameters that might need tuning
+model:
+  lambda_attention: 1.0  # Start with 1.0, may need to reduce if attention loss dominates
+  
+# Optional: Start with lower learning rate for fine-tuning
+trainer:
+  learning_rate: 1e-5  # Lower than default 3e-5

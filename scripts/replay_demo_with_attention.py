@@ -22,7 +22,10 @@ from pfp.common.attention_visualization import (
 
 # Import exact bbox extraction functions
 try:
-    from scripts.exact_bbox_extraction_for_replay import extract_exact_bboxes_from_replay_data
+    from scripts.exact_bbox_extraction_for_replay import (
+        extract_exact_bboxes_from_replay_data,
+        extract_exact_object_points_from_masks
+    )
     HAS_EXACT_EXTRACTION = True
 except ImportError:
     print("Warning: exact_bbox_extraction_for_replay not found - using approximate method")
@@ -98,32 +101,6 @@ def extract_object_bbox_from_masks(pcd, masks, object_id, camera_names):
     }
 
 
-def draw_bbox_3d(ax, center, size, color='red', alpha=0.8, label=None):
-    """Draw 3D bounding box wireframe."""
-    # Create corners
-    corners = []
-    for dx in [-0.5, 0.5]:
-        for dy in [-0.5, 0.5]:
-            for dz in [-0.5, 0.5]:
-                corner = center + size * np.array([dx, dy, dz])
-                corners.append(corner)
-    corners = np.array(corners)
-    
-    # Draw edges
-    edges = [
-        [0,1], [0,2], [0,4], [1,3], [1,5],
-        [2,3], [2,6], [3,7], [4,5], [4,6],
-        [5,7], [6,7]
-    ]
-    
-    for edge in edges:
-        points = corners[edge]
-        ax.plot3D(*points.T, color=color, linewidth=2, alpha=alpha)
-    
-    if label:
-        ax.text(*center, label, fontsize=10, color=color, 
-                bbox=dict(boxstyle="round,pad=0.1", facecolor='white', alpha=0.7))
-
 
 def visualize_object_bboxes_from_masks(pcd: np.ndarray, masks: np.ndarray, 
                                       object_ids: list = [31, 34, 35, 92]):
@@ -157,6 +134,63 @@ def visualize_gripper_bbox(pcd: np.ndarray, gripper_pos: np.ndarray, padding: fl
     return attention_weights
 
 
+def create_attention_mask_from_object_points(pcd: np.ndarray, object_points: dict, 
+                                            gripper_pos: np.ndarray = None, 
+                                            distance_threshold: float = 0.01):
+    """
+    Create attention mask where points belonging to objects (or near them) have weight 1.
+    
+    Args:
+        pcd: Point cloud (N, 3)
+        object_points: Dict of {object_id: exact 3D points array}
+        gripper_pos: Optional gripper position to include
+        distance_threshold: Distance threshold for considering a point as belonging to an object
+        
+    Returns:
+        attention_mask: (N,) array with 1 for object points, 0 otherwise
+    """
+    attention_mask = np.zeros(len(pcd), dtype=np.float32)
+    
+    # Combine all object points into one array for efficient distance computation
+    all_object_points = []
+    for obj_id, obj_pts in object_points.items():
+        if len(obj_pts) > 0:
+            all_object_points.append(obj_pts)
+    
+    if len(all_object_points) > 0:
+        all_object_points = np.vstack(all_object_points)
+        
+        # Vectorized distance computation using broadcasting
+        # For each point in pcd, find minimum distance to any object point
+        # This is more efficient than nested loops
+        for i in range(0, len(pcd), 100):  # Process in batches to manage memory
+            batch_end = min(i + 100, len(pcd))
+            batch_pcd = pcd[i:batch_end]
+            
+            # Compute distances from batch points to all object points
+            # Shape: (batch_size, num_object_points)
+            distances = np.linalg.norm(
+                batch_pcd[:, None, :] - all_object_points[None, :, :], 
+                axis=2
+            )
+            
+            # Find minimum distance for each point in batch
+            min_distances = distances.min(axis=1)
+            
+            # Set attention to 1 for points close to objects
+            mask = min_distances < distance_threshold
+            attention_mask[i:batch_end][mask] = 1.0
+    
+    # Include gripper region if provided
+    if gripper_pos is not None:
+        # Add small region around gripper
+        gripper_distances = np.linalg.norm(pcd - gripper_pos[None, :], axis=1)
+        gripper_mask = gripper_distances < 0.05  # 5cm radius around gripper
+        attention_mask[gripper_mask] = 1.0
+    
+    return attention_mask
+
+
 def replay_demo(
     data_path: str,
     episode_idx: int = 0,
@@ -173,7 +207,7 @@ def replay_demo(
         data_path: Path to demo data directory
         episode_idx: Which episode to replay (default: 0)
         output_dir: Directory to save visualizations
-        bbox_padding: Padding for gripper bounding box
+        bbox_padding: Padding for gripper bounding box (only used when no masks available)
         vis_mode: Visualization mode
         n_points: Number of points to sample
     """
@@ -256,124 +290,40 @@ def replay_demo(
             if has_exact_extraction and HAS_EXACT_EXTRACTION and t < len(camera_point_clouds):
                 # Use exact extraction with individual camera point clouds
                 try:
-                    individual_bboxes, combined_bbox, object_points = extract_exact_bboxes_from_replay_data(
-                        camera_point_clouds[t], segmentation_masks[t], gripper_pos, 
+                    # Extract exact object points from masks
+                    object_points = extract_exact_object_points_from_masks(
+                        camera_point_clouds[t], segmentation_masks[t], 
                         object_ids_of_interest, debug=(t == 0)
                     )
                     
-                    if combined_bbox is not None:
-                        # Create attention mask for points inside the exact combined bbox
-                        pcd_t = pcd_data[t]
-                        inside_x = (pcd_t[:, 0] >= combined_bbox['min'][0]) & (pcd_t[:, 0] <= combined_bbox['max'][0])
-                        inside_y = (pcd_t[:, 1] >= combined_bbox['min'][1]) & (pcd_t[:, 1] <= combined_bbox['max'][1])
-                        inside_z = (pcd_t[:, 2] >= combined_bbox['min'][2]) & (pcd_t[:, 2] <= combined_bbox['max'][2])
-                        
-                        attention_mask = (inside_x & inside_y & inside_z).astype(np.float32)
-                        
-                        # Also add gripper-centered attention to ensure gripper area gets high attention
-                        gripper_attention = visualize_gripper_bbox(pcd_data[t], gripper_pos, 0.05)
-                        attention_mask = np.maximum(attention_mask, gripper_attention)
-                        
-                        combined_bboxes.append(combined_bbox)
-                        
-                        if t == 0:  # Debug info for first frame
-                            print(f"  Frame {t} - EXACT extraction:")
-                            print(f"    Individual objects found: {list(individual_bboxes.keys())}")
-                            print(f"    Combined bbox: center={combined_bbox['center']}, size={combined_bbox['size']}")
-                            for obj_id, bbox in individual_bboxes.items():
-                                print(f"    Object {obj_id}: {bbox['n_points']} exact points")
-                    else:
-                        # Fallback to gripper only
-                        attention_mask = visualize_gripper_bbox(pcd_data[t], gripper_pos, bbox_padding)
-                        combined_bboxes.append(None)
-                        
-                except Exception as e:
-                    print(f"  Frame {t} - Exact extraction failed: {e}, falling back to approximate")
-                    # Fall back to approximate method
-                    object_bboxes = visualize_object_bboxes_from_masks(
-                        pcd_data[t], segmentation_masks[t], object_ids_of_interest
+                    # Create attention mask directly from object points
+                    attention_mask = create_attention_mask_from_object_points(
+                        pcd_data[t], object_points, gripper_pos, distance_threshold=0.01
                     )
                     
-                    # Use approximate method (existing code)
-                    all_key_points = [gripper_pos]
-                    for obj_id, bbox in object_bboxes.items():
-                        all_key_points.extend([bbox['min'], bbox['max']])
+                    combined_bboxes.append(None)  # No bbox needed
                     
-                    if len(all_key_points) > 1:
-                        all_points = np.array(all_key_points)
-                        combined_min = all_points.min(axis=0)
-                        combined_max = all_points.max(axis=0)
-                        combined_center = (combined_min + combined_max) / 2
-                        combined_size = combined_max - combined_min
+                    if t == 0:  # Debug info for first frame
+                        print(f"  Frame {t} - Direct mask extraction:")
+                        total_object_points = sum(len(pts) for pts in object_points.values())
+                        print(f"    Objects found: {list(object_points.keys())}")
+                        print(f"    Total object points: {total_object_points}")
+                        print(f"    Attention points: {attention_mask.sum()}/{len(attention_mask)}")
+                        for obj_id, pts in object_points.items():
+                            if len(pts) > 0:
+                                print(f"    Object {obj_id}: {len(pts)} exact points")
                         
-                        combined_bbox = {
-                            'center': combined_center,
-                            'size': combined_size,
-                            'min': combined_min,
-                            'max': combined_max
-                        }
-                        
-                        pcd_t = pcd_data[t]
-                        inside_x = (pcd_t[:, 0] >= combined_min[0]) & (pcd_t[:, 0] <= combined_max[0])
-                        inside_y = (pcd_t[:, 1] >= combined_min[1]) & (pcd_t[:, 1] <= combined_max[1])
-                        inside_z = (pcd_t[:, 2] >= combined_min[2]) & (pcd_t[:, 2] <= combined_max[2])
-                        
-                        attention_mask = (inside_x & inside_y & inside_z).astype(np.float32)
-                        gripper_attention = visualize_gripper_bbox(pcd_data[t], gripper_pos, 0.05)
-                        attention_mask = np.maximum(attention_mask, gripper_attention)
-                        combined_bboxes.append(combined_bbox)
-                    else:
-                        attention_mask = visualize_gripper_bbox(pcd_data[t], gripper_pos, bbox_padding)
-                        combined_bboxes.append(None)
-            else:
-                # Use approximate method (existing code)
-                object_bboxes = visualize_object_bboxes_from_masks(
-                    pcd_data[t], segmentation_masks[t], object_ids_of_interest
-                )
-                
-                # Collect all key points: gripper + all object bbox corners
-                all_key_points = [gripper_pos]
-                
-                for obj_id, bbox in object_bboxes.items():
-                    # Add all corners of each object bbox
-                    all_key_points.extend([bbox['min'], bbox['max']])
-                    if t == 0:  # Debug for first frame
-                        print(f"  Frame {t} - APPROXIMATE Object {obj_id}: min={bbox['min']}, max={bbox['max']}")
-                
-                if len(all_key_points) > 1:
-                    # Create single tight bounding box around ALL key points
-                    all_points = np.array(all_key_points)
-                    combined_min = all_points.min(axis=0)
-                    combined_max = all_points.max(axis=0)
-                    combined_center = (combined_min + combined_max) / 2
-                    combined_size = combined_max - combined_min
-                    
-                    combined_bbox = {
-                        'center': combined_center,
-                        'size': combined_size,
-                        'min': combined_min,
-                        'max': combined_max
-                    }
-                    
-                    if t == 0:
-                        print(f"  Frame {t} - Combined bbox: center={combined_center}, size={combined_size}")
-                    
-                    # Create attention mask for points inside the combined bbox
-                    pcd_t = pcd_data[t]
-                    inside_x = (pcd_t[:, 0] >= combined_min[0]) & (pcd_t[:, 0] <= combined_max[0])
-                    inside_y = (pcd_t[:, 1] >= combined_min[1]) & (pcd_t[:, 1] <= combined_max[1])
-                    inside_z = (pcd_t[:, 2] >= combined_min[2]) & (pcd_t[:, 2] <= combined_max[2])
-                    
-                    attention_mask = (inside_x & inside_y & inside_z).astype(np.float32)
-                    
-                    # Also add gripper-centered attention to ensure gripper area gets high attention
-                    gripper_attention = visualize_gripper_bbox(pcd_data[t], gripper_pos, 0.05)  # Small radius around gripper
-                    attention_mask = np.maximum(attention_mask, gripper_attention)
-                    combined_bboxes.append(combined_bbox)
-                else:
-                    # Fallback to gripper only
+                except Exception as e:
+                    print(f"  Frame {t} - Exact extraction failed: {e}, falling back to gripper-only")
+                    # Fall back to gripper-only attention
                     attention_mask = visualize_gripper_bbox(pcd_data[t], gripper_pos, bbox_padding)
                     combined_bboxes.append(None)
+            else:
+                # No individual camera point clouds - fall back to gripper-only
+                if t == 0:
+                    print(f"  Frame {t} - No camera point clouds available, using gripper-only attention")
+                attention_mask = visualize_gripper_bbox(pcd_data[t], gripper_pos, bbox_padding)
+                combined_bboxes.append(None)
         else:
             # Fallback to gripper-based attention if no masks
             attention_mask = visualize_gripper_bbox(pcd_data[t], gripper_pos, bbox_padding)
@@ -386,9 +336,9 @@ def replay_demo(
     
     if has_masks:
         if has_exact_extraction and HAS_EXACT_EXTRACTION:
-            print(f"Generated attention masks from EXACT combined bounding boxes with {attention_masks.mean():.2%} average attention")
+            print(f"Generated attention masks from exact object segmentation with {attention_masks.mean():.2%} average attention")
         else:
-            print(f"Generated attention masks from APPROXIMATE combined bounding boxes with {attention_masks.mean():.2%} average attention")
+            print(f"Generated attention masks from approximate object detection with {attention_masks.mean():.2%} average attention")
     else:
         print(f"Generated gripper-based attention masks with {attention_masks.mean():.2%} average attention")
     
@@ -415,9 +365,9 @@ def replay_demo(
             ax1.set_xlabel('X'); ax1.set_ylabel('Y'); ax1.set_zlabel('Z')
             
             # Set fixed axis limits
-            x_range = [-0.3, 0.6]
-            y_range = [-0.6, 0.3]
-            z_range = [0.0, 1.5]
+            x_range = [-0.3, 0.4]
+            y_range = [-0.2, 0.3]
+            z_range = [0.6, 1.5]
             ax1.set_xlim(x_range); ax1.set_ylim(y_range); ax1.set_zlim(z_range)
             ax1.set_box_aspect([1,1,1])  # Equal aspect ratio
             
@@ -430,15 +380,7 @@ def replay_demo(
             # Add gripper position
             ax2.scatter(*gripper_positions[t], c='red', s=100, marker='*', linewidths=3)
             
-            # Draw single combined bounding box covering all objects of interest + gripper
-            if has_masks and t < len(combined_bboxes) and combined_bboxes[t] is not None:
-                combined_bbox = combined_bboxes[t]
-                
-                # Draw single green bounding box covering everything
-                draw_bbox_3d(ax2, combined_bbox['center'], combined_bbox['size'], 
-                           color='green', alpha=0.8, label='Combined Objects + Gripper')
-                
-                # ax2.legend()
+            # No bounding box drawing needed - attention is shown by point colors
             
             ax2.set_title(f"Attention Weights (t={t})")
             ax2.set_xlabel('X'); ax2.set_ylabel('Y'); ax2.set_zlabel('Z')
@@ -506,9 +448,9 @@ def replay_demo(
                 ax1.set_xlabel('X'); ax1.set_ylabel('Y'); ax1.set_zlabel('Z')
                 
                 # Set fixed axis limits
-                x_range = [-0.3, 0.6]
-                y_range = [-0.6, 0.3]
-                z_range = [0.0, 1.5]
+                x_range = [-0.3, 0.4]
+                y_range = [-0.2, 0.3]
+                z_range = [0.6, 1.5]
                 ax1.set_xlim(x_range); ax1.set_ylim(y_range); ax1.set_zlim(z_range)
                 ax1.set_box_aspect([1,1,1])  # Equal aspect ratio
                 
@@ -521,15 +463,7 @@ def replay_demo(
                 # Add gripper position
                 ax2.scatter(*gripper_positions[t], c='red', s=200, marker='*', linewidths=4)
                 
-                # Draw single combined bounding box covering all objects of interest + gripper
-                if has_masks and t < len(combined_bboxes) and combined_bboxes[t] is not None:
-                    combined_bbox = combined_bboxes[t]
-                    
-                    # Draw single green bounding box covering everything
-                    draw_bbox_3d(ax2, combined_bbox['center'], combined_bbox['size'], 
-                               color='green', alpha=0.8, label='Combined Objects + Gripper')
-                    
-                    # ax2.legend()
+                # No bounding box drawing needed - attention is shown by point colors
                 
                 ax2.set_title(f"Attention Weights (Step {t+1}/{max_frames})", fontsize=14)
                 ax2.set_xlabel('X'); ax2.set_ylabel('Y'); ax2.set_zlabel('Z')
@@ -625,7 +559,6 @@ def replay_demo(
         f.write(f"Point cloud shape: {pcd_data.shape}\n")
         f.write(f"Average attention: {attention_masks.mean():.2%}\n")
         f.write(f"Attention std: {attention_masks.std():.4f}\n")
-        f.write(f"Gripper bbox padding: {bbox_padding}m\n")
         f.write(f"Points in attention region: {(attention_masks > 0).sum()} / {attention_masks.size}\n")
         f.write(f"\nGripper trajectory:\n")
         f.write(f"Start position: {gripper_positions[0]}\n")

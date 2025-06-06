@@ -39,6 +39,7 @@ class RLBenchEnv(BaseEnv):
         headless: bool,
         vis: bool,
         obs_mode: str = "pcd",
+        crop_workspace: bool = True,  # New parameter to control workspace cropping
     ):
         assert obs_mode in ["pcd", "rgb"], "Invalid obs_mode"
         self.obs_mode = obs_mode
@@ -46,10 +47,11 @@ class RLBenchEnv(BaseEnv):
         self.voxel_size = voxel_size
         self.n_points = n_points
         self.use_pc_color = use_pc_color
+        self.crop_workspace = crop_workspace
         camera_config = CameraConfig(
             rgb=True,
             depth=False,
-            mask=False,
+            mask=True,  # Enable mask to get object segmentation
             point_cloud=True,
             image_size=(128, 128),
             render_mode=RenderMode.OPENGL,
@@ -62,6 +64,9 @@ class RLBenchEnv(BaseEnv):
             front_camera=camera_config,
             gripper_matrix=True,
             gripper_joint_positions=True,
+            task_low_dim_state=True,  # Enable task-specific low-dimensional state
+            joint_positions=True,
+            joint_velocities=True,
         )
         # EE pose is (X,Y,Z,Qx,Qy,Qz,Qw)
         action_mode = MoveArmThenGripper(
@@ -155,7 +160,9 @@ class RLBenchEnv(BaseEnv):
         front_pcd = make_pcd(obs.front_point_cloud, obs.front_rgb)
         wrist_pcd = make_pcd(obs.wrist_point_cloud, obs.wrist_rgb)
         pcd_list = [right_pcd, left_pcd, overhead_pcd, front_pcd, wrist_pcd]
-        pcd = merge_pcds(self.voxel_size, self.n_points, pcd_list, self.ws_aabb)
+        # Add crop_workspace parameter - set to False to disable workspace cropping
+        crop_workspace = getattr(self, 'crop_workspace', True)  # Default to True for backward compatibility
+        pcd = merge_pcds(self.voxel_size, self.n_points, pcd_list, self.ws_aabb, crop_workspace)
         return pcd
 
     def get_images(self, obs: Observation) -> np.ndarray:
@@ -169,6 +176,68 @@ class RLBenchEnv(BaseEnv):
             )
         )
         return images
+    
+    def get_object_poses(self, obs: Observation) -> dict:
+        """
+        Extract object poses and bounding boxes from RLBench observation.
+        
+        Returns:
+            dict: Dictionary containing:
+                - 'task_low_dim_state': Task-specific low-dimensional state (includes object poses)
+                - 'object_masks': Object segmentation masks from cameras
+                - 'joint_positions': Robot joint positions
+                - 'joint_velocities': Robot joint velocities
+        """
+        object_info = {}
+        
+        # Task-specific low-dimensional state (usually contains object poses/states)
+        if hasattr(obs, 'task_low_dim_state') and obs.task_low_dim_state is not None:
+            object_info['task_low_dim_state'] = obs.task_low_dim_state
+        
+        # Object segmentation masks from cameras
+        masks = {}
+        if hasattr(obs, 'right_shoulder_mask') and obs.right_shoulder_mask is not None:
+            masks['right_shoulder_mask'] = obs.right_shoulder_mask
+        if hasattr(obs, 'left_shoulder_mask') and obs.left_shoulder_mask is not None:
+            masks['left_shoulder_mask'] = obs.left_shoulder_mask
+        if hasattr(obs, 'overhead_mask') and obs.overhead_mask is not None:
+            masks['overhead_mask'] = obs.overhead_mask
+        if hasattr(obs, 'front_mask') and obs.front_mask is not None:
+            masks['front_mask'] = obs.front_mask
+        if hasattr(obs, 'wrist_mask') and obs.wrist_mask is not None:
+            masks['wrist_mask'] = obs.wrist_mask
+        
+        if masks:
+            object_info['object_masks'] = masks
+        
+        # Joint information
+        if hasattr(obs, 'joint_positions') and obs.joint_positions is not None:
+            object_info['joint_positions'] = obs.joint_positions
+        if hasattr(obs, 'joint_velocities') and obs.joint_velocities is not None:
+            object_info['joint_velocities'] = obs.joint_velocities
+        
+        return object_info
+    
+    def get_object_bounding_boxes_from_masks(self, masks: dict) -> dict:
+        """
+        Extract 3D bounding boxes from object segmentation masks and point clouds.
+        
+        Args:
+            masks: Dictionary of camera masks
+            
+        Returns:
+            dict: Dictionary with camera names as keys and bounding box info as values
+        """
+        bbox_info = {}
+        
+        # We would need to process masks and corresponding point clouds
+        # This is a placeholder for the actual implementation
+        # In practice, you would:
+        # 1. Use the masks to segment objects in each camera view
+        # 2. Use the corresponding point clouds to get 3D positions
+        # 3. Compute bounding boxes from the segmented point clouds
+        
+        return bbox_info
 
     def vis_step(self, robot_state: np.ndarray, obs: np.ndarray, prediction: np.ndarray = None):
         """
