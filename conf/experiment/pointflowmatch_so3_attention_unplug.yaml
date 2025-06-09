@@ -14,8 +14,18 @@ dataset:
   
 # Training hyperparameters that might need tuning
 model:
-  lambda_attention: 1.0  # Start with 1.0, may need to reduce if attention loss dominates
+  lambda_attention: 0.1  # Reduced from 0.5 to minimize attention overfitting
+  
+# Reduce attention capacity to prevent overfitting
+backbone:
+  attention_hidden_dim: 32  # Reduced from 256 to prevent overfitting
   
 # Optional: Start with lower learning rate for fine-tuning
 trainer:
-  learning_rate: 1e-5  # Lower than default 3e-5
+  learning_rate: 3e-5  # Lower than default 3e-5
+
+# WandB configuration
+wandb:
+  name: "attention_lambda0.1_dropout0.3_hidden32"  # Custom run name
+  # project: "pointflowmatch"  # Optional: override project name
+  # tags: ["attention", "dropout", "reduced_capacity"]  # Optional: add tags

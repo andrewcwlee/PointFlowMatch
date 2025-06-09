@@ -1,4 +1,4 @@
-""" PointNet with Attention - Enhanced version with supervised 3D spatial attention mechanism """
+""" PointNet with Simple Learnable Attention Weights - Alternative implementation """
 
 import numpy as np
 import torch
@@ -24,9 +24,6 @@ class STN3d(nn.Module):
         self.bn1 = nn.BatchNorm1d(64)
         self.bn2 = nn.BatchNorm1d(128)
         self.bn3 = nn.BatchNorm1d(1024)
-        # self.bn4 = nn.BatchNorm1d(512)
-        # self.bn5 = nn.BatchNorm1d(256)
-
         self.bn4 = nn.LayerNorm(512)
         self.bn5 = nn.LayerNorm(256)
 
@@ -68,9 +65,6 @@ class STNkd(nn.Module):
         self.bn1 = nn.BatchNorm1d(64)
         self.bn2 = nn.BatchNorm1d(128)
         self.bn3 = nn.BatchNorm1d(1024)
-        # self.bn4 = nn.BatchNorm1d(512)
-        # self.bn5 = nn.BatchNorm1d(256)
-
         self.bn4 = nn.LayerNorm(512)
         self.bn5 = nn.LayerNorm(256)
 
@@ -100,10 +94,14 @@ class STNkd(nn.Module):
         return x
 
 
-class PointNetfeatAttention(nn.Module):
+class PointNetfeatSimpleAttention(nn.Module):
+    """
+    Alternative attention implementation with direct learnable weights per point.
+    Instead of computing attention from features, we learn a fixed set of weights.
+    """
     def __init__(self, input_channels: int, input_transform: bool, feature_transform=False, 
-                 attention_hidden_dim=256):
-        super(PointNetfeatAttention, self).__init__()
+                 num_points=4096):
+        super(PointNetfeatSimpleAttention, self).__init__()
         self.input_transform = input_transform
         if self.input_transform:
             self.stn = STNkd(k=input_channels)
@@ -117,16 +115,88 @@ class PointNetfeatAttention(nn.Module):
         if self.feature_transform:
             self.fstn = STNkd(k=64)
         
-        # Attention module - applied after conv2 (128 channels)
-        # Note: No sigmoid here, will be applied in BCEWithLogitsLoss
-        self.attention_head = nn.Sequential(
-            nn.Conv1d(128, attention_hidden_dim, 1),
-            nn.BatchNorm1d(attention_hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.3),  # Add dropout to prevent overfitting
-            nn.Conv1d(attention_hidden_dim, 1, 1)
-        )
+        # Simple learnable attention weights - one weight per point
+        # Initialize with uniform weights
+        self.attention_logits = nn.Parameter(torch.zeros(1, 1, num_points))
+        
+    def forward(self, x):
+        b = x.size(0)
+        n_points = x.size(2)
+        
+        if len(x.shape) == 4:
+            x = x.view(b, -1, 3).permute(0, 2, 1).contiguous()
 
+        if self.input_transform:
+            trans = self.stn(x)
+            x = x.transpose(2, 1)
+            x = torch.bmm(x, trans)
+            x = x.transpose(2, 1)
+        else:
+            trans = None
+
+        x = F.relu(self.bn1(self.conv1(x)))
+
+        if self.feature_transform:
+            trans_feat = self.fstn(x)
+            x = x.transpose(2, 1)
+            x = torch.bmm(x, trans_feat)
+            x = x.transpose(2, 1)
+        else:
+            trans_feat = None
+
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.bn3(self.conv3(x))  # [B, 1024, NumPoints]
+        
+        # Get attention weights for current number of points
+        # Handle variable number of points by interpolating or truncating
+        if n_points != self.attention_logits.size(2):
+            # Interpolate attention logits to match current point cloud size
+            attention_logits = F.interpolate(
+                self.attention_logits, 
+                size=n_points, 
+                mode='linear', 
+                align_corners=False
+            )
+        else:
+            attention_logits = self.attention_logits
+        
+        # Expand to batch size
+        attention_logits = attention_logits.expand(b, -1, -1)
+        
+        # Apply softmax to get normalized weights
+        attention_weights = torch.softmax(attention_logits, dim=-1)
+        
+        # Weighted sum instead of max pooling
+        x = torch.sum(x * attention_weights, dim=2)  # [B, 1024]
+        
+        # Return both features and attention logits for supervision
+        return x, attention_logits.squeeze(1)  # attention_logits: [B, NumPoints]
+
+
+class PointNetfeatConditionedAttention(nn.Module):
+    """
+    Another alternative: Condition the attention weights on global features.
+    This is a middle ground between fixed weights and the full attention head.
+    """
+    def __init__(self, input_channels: int, input_transform: bool, feature_transform=False):
+        super(PointNetfeatConditionedAttention, self).__init__()
+        self.input_transform = input_transform
+        if self.input_transform:
+            self.stn = STNkd(k=input_channels)
+        self.conv1 = torch.nn.Conv1d(input_channels, 64, 1)
+        self.conv2 = torch.nn.Conv1d(64, 128, 1)
+        self.conv3 = torch.nn.Conv1d(128, 1024, 1)
+        self.bn1 = nn.BatchNorm1d(64)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.bn3 = nn.BatchNorm1d(1024)
+        self.feature_transform = feature_transform
+        if self.feature_transform:
+            self.fstn = STNkd(k=64)
+        
+        # Simple attention: just a 1x1 conv from features to weights
+        # No hidden layers, just direct projection
+        self.attention_proj = nn.Conv1d(1024, 1, 1)
+        
     def forward(self, x):
         b = x.size(0)
         if len(x.shape) == 4:
@@ -151,42 +221,51 @@ class PointNetfeatAttention(nn.Module):
             trans_feat = None
 
         x = F.relu(self.bn2(self.conv2(x)))
-        
-        # Generate attention logits after conv2 (128 channels)
-        attention_logits = self.attention_head(x)  # [B, 1, NumPoints]
-        attention_weights = torch.softmax(attention_logits, dim=-1)  # Softmax for proper weighting
-        
-        # Apply conv3 without early feature modulation
         x = self.bn3(self.conv3(x))  # [B, 1024, NumPoints]
         
-        # Replace max pooling with attention-weighted summation
-        x = torch.sum(x * attention_weights, dim=2)  # [B, 1024] - Direct attention control
+        # Simple attention: direct projection from features
+        attention_logits = self.attention_proj(x)  # [B, 1, NumPoints]
+        attention_weights = torch.softmax(attention_logits, dim=-1)
         
-        # Return both features and attention logits (not sigmoid)
-        return x, attention_logits.squeeze(1)  # attention_logits: [B, NumPoints]
+        # Weighted sum
+        x = torch.sum(x * attention_weights, dim=2)  # [B, 1024]
+        
+        return x, attention_logits.squeeze(1)
 
 
-class PointNetAttentionBackbone(nn.Module):
+class PointNetSimpleAttentionBackbone(nn.Module):
+    """
+    Backbone using the simple attention mechanism.
+    You can choose between:
+    - 'fixed': Fixed learnable weights per point
+    - 'conditioned': Simple projection from features
+    - 'full': Full attention head (original implementation)
+    """
     def __init__(
         self,
         embed_dim: int,
         input_channels: int,
         input_transform: bool,
         use_group_norm: bool = False,
-        attention_hidden_dim: int = 256,
+        attention_type: str = 'fixed',
+        num_points: int = 4096,
     ):
         super().__init__()
         assert input_channels in [3, 6], "Input channels must be 3 or 6"
+        assert attention_type in ['fixed', 'conditioned'], "Invalid attention type"
         
-        # Store embed_dim for BC policy access
-        self.embed_dim = embed_dim
-        
-        # Create PointNetfeat with attention
-        self.pointnet_feat = PointNetfeatAttention(
-            input_channels, 
-            input_transform, 
-            attention_hidden_dim=attention_hidden_dim
-        )
+        # Choose attention mechanism
+        if attention_type == 'fixed':
+            self.pointnet_feat = PointNetfeatSimpleAttention(
+                input_channels, 
+                input_transform,
+                num_points=num_points
+            )
+        else:  # conditioned
+            self.pointnet_feat = PointNetfeatConditionedAttention(
+                input_channels, 
+                input_transform
+            )
         
         # Create the rest of the backbone
         self.feature_transform = nn.Sequential(
@@ -226,11 +305,10 @@ class PointNetAttentionBackbone(nn.Module):
         encoded_pcd = self.feature_transform(pointnet_features)
         
         nx = torch.cat([encoded_pcd, robot_state_obs], dim=1)
-        # Reshape back to the batch dimension. Now the features of each time step are concatenated
+        # Reshape back to the batch dimension
         nx = nx.reshape(B, -1)
         
         # Reshape attention logits back to batch dimension
-        # attention_weights shape: [B*T, NumPoints] 
-        attention_logits = attention_weights.reshape(B, -1)  # [B, T*NumPoints]
+        attention_logits = attention_weights.reshape(B, -1)
         
         return nx, attention_logits

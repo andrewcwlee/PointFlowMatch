@@ -58,9 +58,31 @@ class FMSO3AttentionPolicy(ComposerModel, BasePolicy):
         else:
             raise NotImplementedError
         
-        # BCE loss for attention supervision - with logits for autocast safety
-        self.attention_loss_fn = nn.BCEWithLogitsLoss()
+        # Cosine similarity loss for attention supervision (more natural than BCE)
+        # No need for a separate loss function - implemented as method
         return
+    
+    def cosine_similarity_loss(self, pred_logits: torch.Tensor, gt_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Cosine similarity loss for attention supervision.
+        
+        Args:
+            pred_logits: Predicted attention logits [B, T*NumPoints]
+            gt_mask: Ground truth attention mask [B, T*NumPoints]
+            
+        Returns:
+            Negative cosine similarity (for minimization)
+        """
+        # Convert logits to softmax probabilities (normalized)
+        pred_probs = torch.softmax(pred_logits, dim=-1)
+        pred_norm = torch.nn.functional.normalize(pred_probs, dim=-1)
+        
+        # Normalize ground truth mask to unit vector
+        gt_norm = torch.nn.functional.normalize(gt_mask, dim=-1)
+        
+        # Compute cosine similarity and return negative (to minimize)
+        cosine_sim = torch.nn.functional.cosine_similarity(pred_norm, gt_norm, dim=-1)
+        return -cosine_sim.mean()  # Negative for minimization
 
     def set_num_k_infer(self, num_k_infer: int):
         self.num_k_infer = num_k_infer
@@ -207,31 +229,54 @@ class FMSO3AttentionPolicy(ComposerModel, BasePolicy):
             # Attention mask provided
             pcd, robot_state_obs, robot_state_pred, attention_mask = batch
             
-        loss_xyz, loss_so3, loss_grip, loss_attention, attention_iou = self.calculate_loss(
+        loss_xyz, loss_so3, loss_grip, loss_attention, attention_iou, cosine_sim_value, attention_entropy, gt_coverage, pred_sparsity = self.calculate_loss(
             pcd, robot_state_obs, robot_state_pred, attention_mask
         )
         
-        loss = (
+        # Calculate pure task loss (without attention)
+        task_loss = (
             self.l_w["xyz"] * loss_xyz + 
             self.l_w["so3"] * loss_so3 + 
             self.l_w["grip"] * loss_grip
         )
         
+        # Start with task loss
+        total_loss = task_loss
+        
         # Add attention loss if available
         if loss_attention is not None:
-            loss = loss + self.lambda_attention * loss_attention
-            self.logger.log_metrics({"loss/train/attention": loss_attention.item()})
-            if attention_iou is not None:
-                self.logger.log_metrics({"metrics/train/attention_iou": attention_iou.item()})
+            total_loss = total_loss + self.lambda_attention * loss_attention
             
+            # Log attention loss and metrics
+            log_dict = {
+                "loss/train/attention_cosine": loss_attention.item(),
+                "metrics/train/attention_iou": attention_iou.item() if attention_iou is not None else 0.0,
+            }
+            
+            # Add cosine similarity and other metrics if available
+            if cosine_sim_value is not None:
+                log_dict["metrics/train/cosine_similarity"] = cosine_sim_value.item()
+            if attention_entropy is not None:
+                log_dict["metrics/train/attention_entropy"] = attention_entropy.item()
+            if gt_coverage is not None:
+                log_dict["metrics/train/gt_coverage"] = gt_coverage.item()
+            if pred_sparsity is not None:
+                log_dict["metrics/train/pred_sparsity"] = pred_sparsity.item()
+                
+            self.logger.log_metrics(log_dict)
+            
+        # Log all losses: individual components, total (task), and total_attention (task + attention)
         self.logger.log_metrics(
             {
                 "loss/train/xyz": loss_xyz.item(),
                 "loss/train/so3": loss_so3.item(),
                 "loss/train/grip": loss_grip.item(),
+                "loss/train/total": task_loss.item(),           # Pure task performance (xyz + so3 + grip)
+                "loss/train/total_attention": total_loss.item(),  # Complete training loss (task + attention)
             }
         )
-        return loss
+        
+        return total_loss
 
     def calculate_loss(
         self, 
@@ -291,29 +336,47 @@ class FMSO3AttentionPolicy(ComposerModel, BasePolicy):
         # Calculate attention loss if both prediction and ground truth are available
         loss_attention = None
         attention_iou = None
+        cosine_sim_value = None
+        attention_entropy = None
+        gt_coverage = None
+        pred_sparsity = None
+        
         if predicted_attention_map is not None and attention_mask is not None:
             # Flatten attention masks
             # predicted_attention_map: [B, T*NumPoints]
             # attention_mask: [B, T, NumPoints]
             attention_mask_flat = attention_mask.reshape(B, -1).float()
-            loss_attention = self.attention_loss_fn(predicted_attention_map, attention_mask_flat)
             
-            # Calculate IoU metric for attention
+            # Cosine similarity loss
+            loss_attention = self.cosine_similarity_loss(predicted_attention_map, attention_mask_flat)
+            
+            # Additional metrics for monitoring
             with torch.no_grad():
-                # Convert logits to probabilities and threshold at 0.5
-                pred_probs = torch.sigmoid(predicted_attention_map)
+                # Convert logits to probabilities
+                pred_probs = torch.softmax(predicted_attention_map, dim=-1)
+                
+                # Cosine similarity value (for logging)
+                pred_norm = torch.nn.functional.normalize(pred_probs, dim=-1)
+                gt_norm = torch.nn.functional.normalize(attention_mask_flat, dim=-1)
+                cosine_sim_value = torch.nn.functional.cosine_similarity(pred_norm, gt_norm, dim=-1).mean()
+                
+                # IoU metric (keep for comparison with BCE)
                 pred_binary = (pred_probs > 0.5).float()
                 gt_binary = attention_mask_flat
-                
-                # Calculate intersection and union
                 intersection = (pred_binary * gt_binary).sum(dim=1)
                 union = ((pred_binary + gt_binary) > 0).float().sum(dim=1)
+                attention_iou = (intersection / (union + 1e-6)).mean()
                 
-                # Calculate IoU (add small epsilon to avoid division by zero)
-                iou = intersection / (union + 1e-6)
-                attention_iou = iou.mean()
+                # Attention entropy (measure of focus vs diffusion)
+                attention_entropy = -(pred_probs * torch.log(pred_probs + 1e-8)).sum(dim=-1).mean()
+                
+                # Ground truth coverage (how much of GT is attended)
+                gt_coverage = attention_mask_flat.sum(dim=-1).mean() / attention_mask_flat.shape[-1]
+                
+                # Prediction sparsity (how focused is the attention)
+                pred_sparsity = (pred_probs > 0.1).float().sum(dim=-1).mean() / pred_probs.shape[-1]
         
-        return loss_xyz, loss_so3, loss_grip, loss_attention, attention_iou
+        return loss_xyz, loss_so3, loss_grip, loss_attention, attention_iou, cosine_sim_value, attention_entropy, gt_coverage, pred_sparsity
 
     # ############### Inference ################
 
@@ -330,27 +393,49 @@ class FMSO3AttentionPolicy(ComposerModel, BasePolicy):
             pcd, robot_state_obs, robot_state_pred, attention_mask = batch
 
         # Eval loss
-        loss_xyz, loss_so3, loss_grip, loss_attention, attention_iou = self.calculate_loss(
+        loss_xyz, loss_so3, loss_grip, loss_attention, attention_iou, cosine_sim_value, attention_entropy, gt_coverage, pred_sparsity = self.calculate_loss(
             pcd, robot_state_obs, robot_state_pred, attention_mask
         )
-        loss_total = (
+        
+        # Calculate pure task loss (without attention)
+        task_loss = (
             self.l_w["xyz"] * loss_xyz + 
             self.l_w["so3"] * loss_so3 + 
             self.l_w["grip"] * loss_grip
         )
         
+        # Start with task loss
+        loss_total = task_loss
+        
         if loss_attention is not None:
             loss_total = loss_total + self.lambda_attention * loss_attention
-            self.logger.log_metrics({"loss/eval/attention": loss_attention.item()})
-            if attention_iou is not None:
-                self.logger.log_metrics({"metrics/eval/attention_iou": attention_iou.item()})
             
+            # Log evaluation attention loss and metrics
+            log_dict = {
+                "loss/eval/attention_cosine": loss_attention.item(),
+                "metrics/eval/attention_iou": attention_iou.item() if attention_iou is not None else 0.0,
+            }
+            
+            # Add cosine similarity and other metrics if available
+            if cosine_sim_value is not None:
+                log_dict["metrics/eval/cosine_similarity"] = cosine_sim_value.item()
+            if attention_entropy is not None:
+                log_dict["metrics/eval/attention_entropy"] = attention_entropy.item()
+            if gt_coverage is not None:
+                log_dict["metrics/eval/gt_coverage"] = gt_coverage.item()
+            if pred_sparsity is not None:
+                log_dict["metrics/eval/pred_sparsity"] = pred_sparsity.item()
+                
+            self.logger.log_metrics(log_dict)
+            
+        # Log all losses: individual components, total (task), and total_attention (task + attention)
         self.logger.log_metrics(
             {
                 "loss/eval/xyz": loss_xyz.item(),
                 "loss/eval/so3": loss_so3.item(),
                 "loss/eval/grip": loss_grip.item(),
-                "loss/eval/total": loss_total.item(),
+                "loss/eval/total": task_loss.item(),         # Pure task performance (xyz + so3 + grip)
+                "loss/eval/total_attention": loss_total.item(),  # Complete evaluation loss (task + attention)
             }
         )
 

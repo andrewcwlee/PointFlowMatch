@@ -76,13 +76,20 @@ def main(cfg: OmegaConf):
         # however huggingface diffusers steps it every batch
     )
 
+    # Prepare wandb init_kwargs
+    wandb_init_kwargs = {
+        "config": OmegaConf.to_container(cfg),
+        "mode": "online" if cfg.log_wandb else "disabled",
+    }
+    
+    # Add wandb name if specified in config
+    if hasattr(cfg, 'wandb') and hasattr(cfg.wandb, 'name') and cfg.wandb.name:
+        wandb_init_kwargs["name"] = cfg.wandb.name
+
     wandb_logger = WandBLogger(
         project="pfp-train-fixed",
         entity="itisandrewlee",
-        init_kwargs={
-            "config": OmegaConf.to_container(cfg),
-            "mode": "online" if cfg.log_wandb else "disabled",
-        },
+        init_kwargs=wandb_init_kwargs,
     )
 
     trainer = Trainer(
