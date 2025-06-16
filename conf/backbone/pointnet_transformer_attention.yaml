@@ -1,0 +1,11 @@
+_target_: pfp.backbones.pointnet_transformer_attention.PointTransformerAttentionBackbone
+embed_dim: ${obs_features_dim}
+input_channels: "${eval: '6 if ${dataset.use_pc_color} else 3'}"
+hidden_dim: 384
+num_heads: 8
+num_layers: 6
+dropout: 0.1
+attention_supervision: True
+attention_hidden_dim: 256
+positional_encoding: learned  # "learned" or "sinusoidal"
+use_group_norm: False

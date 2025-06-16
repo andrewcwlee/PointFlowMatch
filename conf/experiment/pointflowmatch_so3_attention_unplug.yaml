@@ -18,7 +18,7 @@ model:
   
 # Reduce attention capacity to prevent overfitting
 backbone:
-  attention_hidden_dim: 32  # Reduced from 256 to prevent overfitting
+  attention_hidden_dim: 128  # Reduced from 256 to prevent overfitting
   
 # Optional: Start with lower learning rate for fine-tuning
 trainer:
@@ -26,6 +26,6 @@ trainer:
 
 # WandB configuration
 wandb:
-  name: "attention_lambda0.1_dropout0.3_hidden32"  # Custom run name
+  name: "attention_normsigmoid_lambda0.1_dropout0.3_hidden128"  # Custom run name with normalized sigmoid
   # project: "pointflowmatch"  # Optional: override project name
-  # tags: ["attention", "dropout", "reduced_capacity"]  # Optional: add tags
+  # tags: ["attention", "normalized_sigmoid", "dropout", "reduced_capacity"]  # Optional: add tags

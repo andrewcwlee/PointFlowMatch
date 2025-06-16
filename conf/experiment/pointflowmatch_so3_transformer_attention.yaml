@@ -1,0 +1,41 @@
+# @package _global_
+# Configuration for transformer backbone with CLS token and attention supervision
+defaults:
+  - override /model: flow_so3_attention
+  - override /backbone: pointnet_transformer_attention
+
+# Dataset configuration
+dataset:
+  _target_: pfp.data.dataset_pcd_attention.RobotDatasetPcdAttention
+  use_bounding_box: True
+  bbox_mode: segmentation  # gripper | custom | segmentation
+  object_ids: [31, 34, 35, 92]  # Task-specific object IDs (update based on task)
+  distance_threshold: 0.01
+  gripper_radius: 0.05
+
+# Model configuration
+model:
+  lambda_attention: 0.5  # Weight for attention loss
+
+# Transformer-specific hyperparameters
+backbone:
+  hidden_dim: 384  # Transformer hidden dimension
+  num_heads: 8     # Multi-head attention heads
+  num_layers: 6    # Number of transformer blocks
+  dropout: 0.1     # Dropout rate
+  attention_supervision: True
+  attention_hidden_dim: 256  # Hidden dim for attention supervision head
+  positional_encoding: learned  # "learned" or "sinusoidal"
+
+# Training hyperparameters
+trainer:
+  learning_rate: 3e-5  # Standard for transformers
+  warmup_steps: 5000   # Important for transformer training
+
+# Optional: Adjust batch size for memory efficiency
+dataloader:
+  batch_size: 64  # Reduced from 128 due to transformer memory usage
+
+# WandB configuration
+wandb:
+  name: "transformer_cls_attention"  # Custom run name

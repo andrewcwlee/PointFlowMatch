@@ -8,3 +8,10 @@
 **/toy_circle/results/**
 *plot.png
 *.svg
+_todo
+CLAUDE.md
+demo_visualization
+mask_bbox_viz
+docs
+test_*.py
+examples

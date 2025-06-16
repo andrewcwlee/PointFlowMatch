@@ -1,0 +1,42 @@
+# @package _global_
+# Configuration for unplug_charger task with transformer backbone
+defaults:
+  - pointflowmatch_so3_transformer_attention
+
+# Task-specific configuration
+env_config:
+  task_name: unplug_charger
+
+# Dataset configuration with task-specific object IDs
+dataset:
+  object_ids: [31, 34, 35, 92]  # Specific to unplug_charger task
+  n_points: 2048  # Reduced from 4096 to save memory
+  
+# Model hyperparameters tuned for this task
+model:
+  lambda_attention: 0.3  # Reduced to prevent overfitting
+  
+# Transformer hyperparameters - smaller model for fine-tuning
+backbone:
+  hidden_dim: 256  # Reduced from 384
+  num_heads: 4
+  num_layers: 2    # Reduced from 6 for faster training
+  dropout: 0.2     # Increased dropout
+  attention_supervision: True
+  attention_hidden_dim: 128  # Reduced capacity
+  positional_encoding: learned
+  use_gradient_checkpointing: True  # Enable to save memory
+
+# Training adjustments
+trainer:
+  learning_rate: 2e-5  # Lower learning rate
+  gradient_accumulation_steps: 4  # Accumulate gradients to simulate larger batch size
+
+# Memory optimization
+dataloader:
+  batch_size: 16  # Further reduced for memory - transformer uses more memory
+
+# WandB configuration
+wandb:
+  name: "transformer_cls_unplug_lambda0.3"
+  tags: ["transformer", "cls_token", "unplug_charger"]

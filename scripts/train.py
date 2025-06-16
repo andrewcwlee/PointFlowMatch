@@ -14,6 +14,7 @@ from pfp import DEVICE, DATA_DIRS, set_seeds
 from pfp.data.dataset_pcd import RobotDatasetPcd
 from pfp.data.dataset_images import RobotDatasetImages
 from pfp.data.dataset_pcd_attention import RobotDatasetPcdAttention
+from pfp.data.dataset_pcd_masked import RobotDatasetPcdMasked
 
 
 @hydra.main(version_base=None, config_path="../conf", config_name="train")
@@ -24,21 +25,44 @@ def main(cfg: OmegaConf):
     print(OmegaConf.to_yaml(cfg))
     set_seeds(cfg.seed)
 
-    # Check if we should use attention dataset
-    if hasattr(cfg, 'dataset') and hasattr(cfg.dataset, '_target_') and 'attention' in cfg.dataset._target_:
-        # Use the attention dataset with segmented data
-        data_path_train = DATA_DIRS.PFP / cfg.task_name / "train_segmented"
-        data_path_valid = DATA_DIRS.PFP / cfg.task_name / "valid_segmented"
-        print(f"Using attention dataset with segmented data")
-        print(f"Train path: {data_path_train}")
-        print(f"Valid path: {data_path_valid}")
+    # Check dataset type from config
+    if hasattr(cfg, 'dataset') and hasattr(cfg.dataset, '_target_'):
+        dataset_target = cfg.dataset._target_
         
-        # Remove _target_ from config before passing to constructor
-        dataset_cfg = OmegaConf.to_container(cfg.dataset, resolve=True)
-        dataset_cfg.pop('_target_', None)
-        
-        dataset_train = RobotDatasetPcdAttention(str(data_path_train), **dataset_cfg)
-        dataset_valid = RobotDatasetPcdAttention(str(data_path_valid), **dataset_cfg)
+        if 'attention' in dataset_target or 'masked' in dataset_target:
+            # Use segmented data for attention or masked datasets
+            data_path_train = DATA_DIRS.PFP / cfg.task_name / "train_segmented"
+            data_path_valid = DATA_DIRS.PFP / cfg.task_name / "valid_segmented"
+            print(f"Using {dataset_target.split('.')[-1]} with segmented data")
+            print(f"Train path: {data_path_train}")
+            print(f"Valid path: {data_path_valid}")
+            
+            # Remove _target_ from config before passing to constructor
+            dataset_cfg = OmegaConf.to_container(cfg.dataset, resolve=True)
+            dataset_cfg.pop('_target_', None)
+            
+            # Instantiate the appropriate dataset
+            if 'RobotDatasetPcdAttention' in dataset_target:
+                dataset_train = RobotDatasetPcdAttention(str(data_path_train), **dataset_cfg)
+                dataset_valid = RobotDatasetPcdAttention(str(data_path_valid), **dataset_cfg)
+            elif 'RobotDatasetPcdMasked' in dataset_target:
+                dataset_train = RobotDatasetPcdMasked(str(data_path_train), **dataset_cfg)
+                dataset_valid = RobotDatasetPcdMasked(str(data_path_valid), **dataset_cfg)
+            else:
+                raise ValueError(f"Unknown dataset type: {dataset_target}")
+        else:
+            # Use standard data path for other datasets
+            data_path_train = DATA_DIRS.PFP / cfg.task_name / "train"
+            data_path_valid = DATA_DIRS.PFP / cfg.task_name / "valid"
+            
+            if cfg.obs_mode == "pcd":
+                dataset_train = RobotDatasetPcd(data_path_train, **cfg.dataset)
+                dataset_valid = RobotDatasetPcd(data_path_valid, **cfg.dataset)
+            elif cfg.obs_mode == "rgb":
+                dataset_train = RobotDatasetImages(data_path_train, **cfg.dataset)
+                dataset_valid = RobotDatasetImages(data_path_valid, **cfg.dataset)
+            else:
+                raise ValueError(f"Unknown observation mode: {cfg.obs_mode}")
     else:
         # Use regular datasets
         data_path_train = DATA_DIRS.PFP / cfg.task_name / "train"

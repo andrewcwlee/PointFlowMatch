@@ -73,8 +73,10 @@ class FMSO3AttentionPolicy(ComposerModel, BasePolicy):
         Returns:
             Negative cosine similarity (for minimization)
         """
-        # Convert logits to softmax probabilities (normalized)
-        pred_probs = torch.softmax(pred_logits, dim=-1)
+        # Convert logits to normalized sigmoid probabilities
+        eps = 1e-8
+        pred_scores = torch.sigmoid(pred_logits)
+        pred_probs = pred_scores / (pred_scores.sum(dim=-1, keepdim=True) + eps)
         pred_norm = torch.nn.functional.normalize(pred_probs, dim=-1)
         
         # Normalize ground truth mask to unit vector
@@ -352,8 +354,10 @@ class FMSO3AttentionPolicy(ComposerModel, BasePolicy):
             
             # Additional metrics for monitoring
             with torch.no_grad():
-                # Convert logits to probabilities
-                pred_probs = torch.softmax(predicted_attention_map, dim=-1)
+                # Convert logits to normalized sigmoid probabilities
+                eps = 1e-8
+                pred_scores = torch.sigmoid(predicted_attention_map)
+                pred_probs = pred_scores / (pred_scores.sum(dim=-1, keepdim=True) + eps)
                 
                 # Cosine similarity value (for logging)
                 pred_norm = torch.nn.functional.normalize(pred_probs, dim=-1)

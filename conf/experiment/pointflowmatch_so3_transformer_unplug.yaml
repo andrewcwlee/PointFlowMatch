@@ -1,0 +1,37 @@
+# @package _global_
+# Configuration for unplug_charger task with transformer backbone (NO attention supervision)
+defaults:
+  - override /model: flow_so3  # Using regular flow model without attention
+  - override /backbone: pointnet_transformer  # Clean transformer without attention head
+
+# Task-specific configuration
+env_config:
+  task_name: unplug_charger
+
+# Dataset configuration - using regular dataset without attention masks
+dataset:
+  n_points: 4096  # Reduced from 4096 to save memory
+  
+# Transformer hyperparameters - optimized for memory
+backbone:
+  hidden_dim: 256  # Reduced from 384
+  num_heads: 4
+  num_layers: 1    # Reduced from 6 for faster training
+  dropout: 0.2
+  positional_encoding: learned
+  use_gradient_checkpointing: True  # Save memory
+
+obs_features_dim: 256 
+
+# Memory optimization  
+dataloader:
+  batch_size: 128  # Balanced for memory and speed
+  
+# Training adjustments
+trainer:
+  gradient_accumulation_steps: 8  # This gives effective batch_size=64 and ~160 steps/epoch
+
+# WandB configuration
+wandb:
+  name: "transformer_cls_no_attention_256_1layers"
+  tags: ["transformer", "cls_token", "no_attention", "unplug_charger"]

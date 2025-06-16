@@ -154,7 +154,12 @@ class PointNetfeatAttention(nn.Module):
         
         # Generate attention logits after conv2 (128 channels)
         attention_logits = self.attention_head(x)  # [B, 1, NumPoints]
-        attention_weights = torch.softmax(attention_logits, dim=-1)  # Softmax for proper weighting
+        
+        # Use normalized sigmoid instead of softmax for multi-region attention
+        attention_scores = torch.sigmoid(attention_logits)
+        # Normalize to sum to 1 while maintaining numerical stability
+        eps = 1e-8
+        attention_weights = attention_scores / (attention_scores.sum(dim=-1, keepdim=True) + eps)
         
         # Apply conv3 without early feature modulation
         x = self.bn3(self.conv3(x))  # [B, 1024, NumPoints]

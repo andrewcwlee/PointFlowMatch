@@ -1,4 +1,4 @@
-""" Transformer backbone with CLS token for point cloud processing with attention supervision """
+""" Transformer backbone with CLS token for point cloud processing """
 
 import math
 import torch
@@ -85,26 +85,24 @@ class TransformerBlock(nn.Module):
         # Dropout
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, x: torch.Tensor, return_attention: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: [B, N, d_model]
-            return_attention: whether to return attention weights
         Returns:
             output: [B, N, d_model]
-            attention_weights: [B, N, N] if return_attention else None
         """
         # Self-attention with residual connection
-        attn_output, attn_weights = self.self_attn(x, x, x, need_weights=return_attention)
+        attn_output, _ = self.self_attn(x, x, x, need_weights=False)
         x = self.norm1(x + self.dropout(attn_output))
         
         # Feedforward with residual connection
         x = self.norm2(x + self.ff(x))
         
-        return x, attn_weights
+        return x
 
 
-class PointTransformerAttentionBackbone(nn.Module):
+class PointTransformerBackbone(nn.Module):
     """Transformer backbone with CLS token for point cloud processing"""
     def __init__(
         self,
@@ -114,8 +112,6 @@ class PointTransformerAttentionBackbone(nn.Module):
         num_heads: int = 8,
         num_layers: int = 6,
         dropout: float = 0.1,
-        attention_supervision: bool = True,
-        attention_hidden_dim: int = 256,
         positional_encoding: str = "learned",  # "learned" or "sinusoidal"
         use_group_norm: bool = False,
         use_gradient_checkpointing: bool = False,  # Enable for memory efficiency
@@ -127,7 +123,6 @@ class PointTransformerAttentionBackbone(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.num_layers = num_layers
-        self.attention_supervision = attention_supervision
         self.use_gradient_checkpointing = use_gradient_checkpointing
         
         # Input projection layer
@@ -162,15 +157,6 @@ class PointTransformerAttentionBackbone(nn.Module):
             nn.Mish()
         )
         
-        # Attention supervision head (if needed)
-        if attention_supervision:
-            self.attention_head = nn.Sequential(
-                nn.Linear(hidden_dim, attention_hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(attention_hidden_dim, 1)
-            )
-        
         # Apply group norm if requested
         if use_group_norm:
             self._replace_batchnorm_with_groupnorm()
@@ -186,15 +172,13 @@ class PointTransformerAttentionBackbone(nn.Module):
             ),
         )
     
-    def forward(self, pcd: torch.Tensor, robot_state_obs: torch.Tensor):
+    def forward(self, pcd: torch.Tensor, robot_state_obs: torch.Tensor) -> torch.Tensor:
         """
         Args:
             pcd: [B, T, N, C] - point cloud observations
             robot_state_obs: [B, T, D] - robot state observations
         Returns:
-            If attention_supervision=True: (nx, attention_logits) tuple
-            If attention_supervision=False: nx only
-            where nx: [B, embed_dim] - global features for UNet conditioning
+            nx: [B, embed_dim] - global features for UNet conditioning
         """
         B = pcd.shape[0]
         T = pcd.shape[1] if len(pcd.shape) == 4 else 1
@@ -220,24 +204,12 @@ class PointTransformerAttentionBackbone(nn.Module):
         x = torch.cat([cls_tokens, point_features], dim=1)  # [B*T, N+1, hidden_dim]
         
         # Pass through transformer blocks
-        attention_weights_list = []
-        for i, block in enumerate(self.transformer_blocks):
-            # Get attention weights from middle layer for supervision
-            return_attn = (i == len(self.transformer_blocks) // 2) and self.attention_supervision
-            
+        for block in self.transformer_blocks:
             if self.use_gradient_checkpointing and self.training:
                 # Use gradient checkpointing to save memory during training
-                def create_custom_forward(module, return_attn):
-                    def custom_forward(x):
-                        return module(x, return_attn)
-                    return custom_forward
-                
-                x, attn_weights = checkpoint(create_custom_forward(block, return_attn), x)
+                x = checkpoint(block, x)
             else:
-                x, attn_weights = block(x, return_attention=return_attn)
-                
-            if attn_weights is not None:
-                attention_weights_list.append(attn_weights)
+                x = block(x)
         
         # Extract CLS token
         cls_output = x[:, 0, :]  # [B*T, hidden_dim]
@@ -251,25 +223,4 @@ class PointTransformerAttentionBackbone(nn.Module):
         # Reshape back to batch dimension
         nx = nx.reshape(B, -1)  # [B, T*(embed_dim + D)]
         
-        # Generate attention logits for supervision
-        if self.attention_supervision:
-            # Use the point features (excluding CLS token) from the last layer
-            point_features_final = x[:, 1:, :]  # [B*T, N, hidden_dim]
-            attention_logits = self.attention_head(point_features_final).squeeze(-1)  # [B*T, N]
-            attention_logits = attention_logits.reshape(B, -1)  # [B, T*N]
-        else:
-            # If using transformer attention weights directly
-            if attention_weights_list:
-                # Average attention from CLS token to all points
-                attn = attention_weights_list[0]  # [B*T, N+1, N+1]
-                cls_attn = attn[:, 0, 1:]  # [B*T, N] - CLS attention to points
-                attention_logits = cls_attn.reshape(B, -1)  # [B, T*N]
-            else:
-                # No attention supervision
-                attention_logits = torch.zeros(B, T * N, device=pcd.device)
-        
-        # Return based on attention supervision setting
-        if self.attention_supervision:
-            return nx, attention_logits
-        else:
-            return nx
+        return nx
